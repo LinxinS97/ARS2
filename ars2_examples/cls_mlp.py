@@ -29,7 +29,7 @@ if __name__ == '__main__':
     parser.add_argument("--linear_ratio", type=float, default=1)
     parser.add_argument("--threshold", type=float, default=0)
     parser.add_argument("--loss_type", type=str, default='normal_la')
-    parser.add_argument("--gpu", type=int, default=0, help="id of gpu")
+    parser.add_argument("--gpuid", type=int, default=0, help="id of gpu")
     args = parser.parse_args()
 
     default_parameter = {
@@ -53,7 +53,7 @@ if __name__ == '__main__':
     imbalance_ratio = args.imbalance_ratio
     linear_ratio = args.linear_ratio
     threshold = args.threshold
-    device = torch.device(f'cuda:{args.gpu}')
+    device = torch.device(f'cuda:{args.gpuid}')
 
     #### Just some code to print debug information to stdout
     logging.basicConfig(format='%(asctime)s - %(message)s',
@@ -144,4 +144,5 @@ if __name__ == '__main__':
         'exp': log,
         'paras': optimized_param[loss_type]}
     results[loss_type] = best_log
-    json.dump(results, open(f'{data_path}/eval_res/inference_distillation_mlp_{data}_{imbalance_ratio}_{ranking_parameter["score_type"]}.json', 'w'), indent=4)
+    json.dump(results, open(f'{data_path}/eval_res/inference_distillation_mlp_{data}_{imbalance_ratio}_'
+                            f'{ranking_parameter["score_type"]}.json', 'w'), indent=4)

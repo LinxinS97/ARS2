@@ -269,47 +269,6 @@ class EndClassifierModel(BaseTorchClassModel):
                 selected_ids.append(class_ids)
             selected_ids = np.concatenate(selected_ids).astype(np.int32)
 
-        elif hyperparas['re_sample_type'] == 'hybrid':
-            selected_ids = sorted_rank_ids[:n // 2]
-            selected_ids = np.concatenate([selected_ids, sorted_rank_ids[-1 * (n // 2):]])
-
-        elif hyperparas['re_sample_type'] == 'class_hybrid':
-            sample_size = n // 2 // dataset.n_class
-            for label in range(dataset.n_class):
-                cur_class_ids = ranking[ranking[:, 4] == label]
-                top_class_ids = cur_class_ids[:sample_size][:, 1]
-                btm_class_ids = cur_class_ids[-1 * sample_size:][:, 1]
-                class_ids = np.concatenate([top_class_ids, btm_class_ids])
-                selected_ids.append(class_ids)
-
-                if self.dev_mode:
-                    class_ids = class_ids.astype(np.int32)
-                    class_dataset = dataset.create_subset(list(class_ids.astype(np.int32)))
-                    class_y = y_train[class_ids]
-                    temp = np.array(class_dataset.labels) == class_y
-                    logger.info(f'selected clear: {len(temp[temp == True]) / len(class_y)}')
-            selected_ids = np.concatenate(selected_ids).astype(np.int32)
-
-        elif hyperparas['re_sample_type'] == 'all_btm':
-            selected_ids = sorted_rank_ids[-1*n:]
-            self.btm_class_ids = np.concatenate([self.btm_class_ids, selected_ids])
-
-        elif hyperparas['re_sample_type'] == 'class_btm':
-            for label in range(dataset.n_class):
-                class_ids = ranking[ranking[:, 4] == label]
-                class_ids = class_ids[-1 * (n // dataset.n_class):]
-                class_ids = class_ids[:, 1]
-                self.btm_class_ids = np.concatenate([self.btm_class_ids, class_ids])
-                selected_ids.append(class_ids)
-
-                if self.dev_mode:
-                    class_ids = class_ids.astype(np.int32)
-                    class_dataset = dataset.create_subset(class_ids.astype(np.int32))
-                    class_y = y_train[class_ids]
-                    temp = np.array(class_dataset.labels) == class_y
-                    logger.info(f'selected clear: {len(temp[temp == True]) / len(class_y)}')
-            selected_ids = np.concatenate(selected_ids).astype(np.int32)
-
         selected_ids = list(set(selected_ids) | set(LFs_id))
         if self.dev_mode:
             new_dataset = dataset.create_subset(selected_ids)
@@ -345,9 +304,6 @@ class EndClassifierModel(BaseTorchClassModel):
             verbose: Optional[bool] = True,
             grid: Optional[bool] = False,
             **kwargs: Any):
-
-        # log_path = "logs"
-        # writer_log = tensorboardX.SummaryWriter(log_path)
 
         if not verbose:
             logger.setLevel(logging.ERROR)

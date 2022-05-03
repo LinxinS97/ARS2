@@ -16,9 +16,9 @@ from ars2 import EndClassifierModel
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--root_path", type=str, default='../')
-    parser.add_argument("--dataset_path", type=str, default='../datasets/')
+    parser.add_argument("--dataset_path", required=True, type=str)
     parser.add_argument("--teacher_path", type=str)
-    parser.add_argument("--data", type=str)
+    parser.add_argument("--data", required=True, type=str)
     parser.add_argument("--n_steps", type=int, default=100000)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--real_batch_size", type=int, default=16)
@@ -93,7 +93,6 @@ if __name__ == '__main__':
                                                      cache_name='roberta',
                                                      model_name=model_name)
 
-    #### Create imbalanced dataset
     aggregated_hard_labels = np.load(f'{data_path}/label_model_output/pred_imbalance{imbalance_ratio}_{data}_hard.npy')
 
     train_ids = np.load(f'{data_path}/label_model_output/train_ids_imbalance{imbalance_ratio}_{data}.npy')
@@ -101,7 +100,6 @@ if __name__ == '__main__':
     train_data = train_data.create_subset(train_ids).get_covered_subset()
     valid_data = valid_data.create_subset(valid_ids)
 
-    # for loss_type in ['normal', 'normal_la', 'en', 'en_la', 'dice', 'ldam']:
     #### Load optimized params
     with open(f"{data_path}/eval_res/optimized{student_m_name}_res_imbalance{imbalance_ratio}_{data}.json", "r") as load_f:
         student_optimized_param = json.load(load_f)
