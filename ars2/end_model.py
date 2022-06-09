@@ -1,5 +1,6 @@
 import logging
 from typing import Any, Optional, Union, Callable
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,6 +10,7 @@ from tqdm.auto import trange
 from transformers import AutoTokenizer
 
 from . import calc_prior
+from ..wrench.utils import set_seed
 from .loss.effective_number import CB_loss
 from .loss.dice_loss import DiceLoss
 from .loss.LDAM_loss import LDAMLoss
@@ -19,13 +21,13 @@ from ..wrench.backbone import BackBone
 from ..wrench.basemodel import BaseTorchClassModel
 from ..wrench.config import Config
 from ..wrench.dataset import BaseDataset, sample_batch
-from ..wrench.utils import cross_entropy_with_probs, set_seed
+from ..wrench.utils import cross_entropy_with_probs
 
 logger = logging.getLogger(__name__)
 
 
 class EndClassifierModel(BaseTorchClassModel):
-    def  __init__(self,
+    def __init__(self,
                  batch_size: Optional[int] = 16,
                  real_batch_size: Optional[int] = 16,
                  test_batch_size: Optional[int] = 16,
@@ -33,6 +35,7 @@ class EndClassifierModel(BaseTorchClassModel):
                  use_lr_scheduler: Optional[bool] = False,
                  binary_mode: Optional[bool] = False,
                  n_steps: Optional[int] = 10000,
+                 warm_up_steps: Optional[int] = 2000,
                  loss_type: Optional[str] = 'normal',  # normal: sce, en, dice, ldam
                  score_type: Optional[str] = None,
                  re_sample_type: Optional[str] = None,
@@ -69,6 +72,7 @@ class EndClassifierModel(BaseTorchClassModel):
             'grad_norm': grad_norm,
             'use_lr_scheduler': use_lr_scheduler,
             'n_steps': n_steps,
+            'warm_up_steps': warm_up_steps,
             'binary_mode': binary_mode,
             'loss_type': loss_type,
             'score_type': score_type,
@@ -182,9 +186,9 @@ class EndClassifierModel(BaseTorchClassModel):
                 pred = self.predict_proba(data)
         pred_labels = np.max(pred, axis=1)
 
-        if self.hyperparas['score_type'] == 'softmax':
+        if self.hyperparas['score_type'] == 'pred':
             scores = pred[list(range(pred.shape[0])), y_train]
-        elif self.hyperparas['score_type'] == 'softmax_distance':
+        elif self.hyperparas['score_type'] == 'margin':
             p_true = pred[list(range(pred.shape[0])), y_train]
             pred[list(range(pred.shape[0])), y_train] = -1
             p_max = np.max(pred, axis=1)
@@ -217,7 +221,8 @@ class EndClassifierModel(BaseTorchClassModel):
                 sorted_rank_ids = np.argsort(ranking_LF[0])[::-1]
 
                 class_N = int(sample_ratio[label] * ranking_LF.shape[1]) if \
-                    int(sample_ratio[label] * ranking_LF.shape[1]) <= n // LFs.shape[1] else int(sample_ratio[label] * n // LFs.shape[1])
+                    int(sample_ratio[label] * ranking_LF.shape[1]) <= n // LFs.shape[1] else int(
+                    sample_ratio[label] * n // LFs.shape[1])
                 # class_N = int(sample_ratio[label] * n // LFs.shape[1])
 
                 ranking_LF_ids = ranking_LF[:, sorted_rank_ids][1, :class_N]
@@ -244,11 +249,9 @@ class EndClassifierModel(BaseTorchClassModel):
             y_train[y_reco[:, 0]] = y_reco[:, 1]
             LFs_id = y_reco[:, 0]
 
-        # Threshold (score > 0)
+        # Threshold (score > thres)
         thres = np.where(ranking[0] >= hyperparas['score_threshold'])[0]
         ranking = ranking[:, thres]
-
-        # Threshold (score > 0)
 
         sorted_rank_ids = np.argsort(ranking[0])[::-1]
         ranking = ranking[:, sorted_rank_ids]
@@ -269,6 +272,47 @@ class EndClassifierModel(BaseTorchClassModel):
                 selected_ids.append(class_ids)
             selected_ids = np.concatenate(selected_ids).astype(np.int32)
 
+        elif hyperparas['re_sample_type'] == 'hybrid':
+            selected_ids = sorted_rank_ids[:n // 2]
+            selected_ids = np.concatenate([selected_ids, sorted_rank_ids[-1 * (n // 2):]])
+
+        elif hyperparas['re_sample_type'] == 'class_hybrid':
+            sample_size = n // 2 // dataset.n_class
+            for label in range(dataset.n_class):
+                cur_class_ids = ranking[ranking[:, 4] == label]
+                top_class_ids = cur_class_ids[:sample_size][:, 1]
+                btm_class_ids = cur_class_ids[-1 * sample_size:][:, 1]
+                class_ids = np.concatenate([top_class_ids, btm_class_ids])
+                selected_ids.append(class_ids)
+
+                if self.dev_mode:
+                    class_ids = class_ids.astype(np.int32)
+                    class_dataset = dataset.create_subset(class_ids.astype(np.int32))
+                    class_y = y_train[class_ids]
+                    temp = np.array(class_dataset.labels) == class_y
+                    logger.info(f'selected clear: {len(temp[temp == True]) / len(class_y)}')
+            selected_ids = np.concatenate(selected_ids).astype(np.int32)
+
+        elif hyperparas['re_sample_type'] == 'all_btm':
+            selected_ids = sorted_rank_ids[-1 * n:]
+            self.btm_class_ids = np.concatenate([self.btm_class_ids, selected_ids])
+
+        elif hyperparas['re_sample_type'] == 'class_btm':
+            for label in range(dataset.n_class):
+                class_ids = ranking[ranking[:, 4] == label]
+                class_ids = class_ids[-1 * (n // dataset.n_class):]
+                class_ids = class_ids[:, 1]
+                self.btm_class_ids = np.concatenate([self.btm_class_ids, class_ids])
+                selected_ids.append(class_ids)
+
+                if self.dev_mode:
+                    class_ids = class_ids.astype(np.int32)
+                    class_dataset = dataset.create_subset(class_ids.astype(np.int32))
+                    class_y = y_train[class_ids]
+                    temp = np.array(class_dataset.labels) == class_y
+                    logger.info(f'selected clear: {len(temp[temp == True]) / len(class_y)}')
+            selected_ids = np.concatenate(selected_ids).astype(np.int32)
+
         selected_ids = list(set(selected_ids) | set(LFs_id))
         if self.dev_mode:
             new_dataset = dataset.create_subset(selected_ids)
@@ -279,7 +323,6 @@ class EndClassifierModel(BaseTorchClassModel):
             logger.info(f'prior: {prior}')
             logger.info(f'selected clean: {len(temp[temp == True]) / len(new_y)}')
             self.sampled_clean.append(len(temp[temp == True]) / len(new_y))
-
 
         return selected_ids, y_train
 
@@ -305,6 +348,9 @@ class EndClassifierModel(BaseTorchClassModel):
             grid: Optional[bool] = False,
             **kwargs: Any):
 
+        # log_path = "logs"
+        # writer_log = tensorboardX.SummaryWriter(log_path)
+
         if not verbose:
             logger.setLevel(logging.ERROR)
 
@@ -316,6 +362,10 @@ class EndClassifierModel(BaseTorchClassModel):
         logger.info(config)
 
         n_steps = hyperparas['n_steps']
+        warm_up_steps = hyperparas['warm_up_steps']
+
+        if not distillation:
+            warm_up_steps = n_steps
 
         if hyperparas['real_batch_size'] == -1 or \
                 hyperparas['batch_size'] < hyperparas['real_batch_size'] or not self.is_bert:
@@ -360,7 +410,7 @@ class EndClassifierModel(BaseTorchClassModel):
             selected_ids, _ = self._get_new_dataset(
                 dataset_train,
                 y_train,
-                N, teacher_ranking
+                N, teacher_ranking, counter
             )
             new_dataset = dataset_train.create_subset(selected_ids)
             label_is_true = np.array(new_dataset.labels) == y_train[selected_ids]
@@ -384,7 +434,7 @@ class EndClassifierModel(BaseTorchClassModel):
             train_dataloader = sample_batch(train_dataloader)
 
         if teacher_model is None or teacher_ranking is not None:
-            with trange(n_steps, desc="[TRAIN] Warmup stage",
+            with trange(warm_up_steps, desc="[TRAIN] Warmup stage",
                         unit="steps", disable=not verbose, ncols=150, position=0, leave=True) as pbar:
                 cnt = 0
                 step = 0
@@ -397,7 +447,7 @@ class EndClassifierModel(BaseTorchClassModel):
 
                 model.train()
                 optimizer.zero_grad()
-                while step < n_steps:
+                while step < warm_up_steps:
                     batch = next(train_dataloader)
                     outputs = model(batch)
                     batch_idx = batch['ids'].to(device)
@@ -455,7 +505,7 @@ class EndClassifierModel(BaseTorchClassModel):
                         pbar.update()
                         pbar.set_postfix(ordered_dict=last_step_log)
 
-                        if step >= n_steps:
+                        if step >= warm_up_steps:
                             break
 
                     # calc ranking score
@@ -601,10 +651,13 @@ class EndClassifierModel(BaseTorchClassModel):
                             new_dataset = dataset_train.create_subset(ids_set)
                             label_is_true = np.array(new_dataset.labels) == y_train[ids_set]
                             if self.dev_mode:
-                                logger.info(f'concat prior: {calc_prior(y_train[ids_set].tolist(), new_dataset.n_class)}')
-                                logger.info(f'concat clean: {len(label_is_true[label_is_true == True]) / len(label_is_true)}')
+                                logger.info(
+                                    f'concat prior: {calc_prior(y_train[ids_set].tolist(), new_dataset.n_class)}')
+                                logger.info(
+                                    f'concat clean: {len(label_is_true[label_is_true == True]) / len(label_is_true)}')
                             ranked_y = torch.Tensor(y_train[ids_set]).to(device)
-                            train_dataloader = self._init_train_dataloader(new_dataset, n_steps=score_step, config=config)
+                            train_dataloader = self._init_train_dataloader(new_dataset, n_steps=score_step,
+                                                                           config=config)
                             train_dataloader = sample_batch(train_dataloader)
                             if not hyperparas['re_sample_concat']:
                                 dataset_ids = np.array([])
@@ -615,7 +668,7 @@ class EndClassifierModel(BaseTorchClassModel):
                             selected_ids, y_train = self._get_new_dataset(
                                 dataset_train,
                                 y_train,
-                                N, ranking
+                                N, ranking, counter
                             )
                             dataset_ids = np.concatenate([dataset_ids, selected_ids]).astype(np.int32)
                             ids_set = list(set(dataset_ids))
@@ -623,7 +676,8 @@ class EndClassifierModel(BaseTorchClassModel):
                             if self.dev_mode:
                                 logger.info(calc_prior(new_dataset.labels, new_dataset.n_class))
                             ranked_y = torch.Tensor(y_train[ids_set]).to(device)
-                            train_dataloader = self._init_train_dataloader(new_dataset, n_steps=score_step, config=config)
+                            train_dataloader = self._init_train_dataloader(new_dataset, n_steps=score_step,
+                                                                           config=config)
                             train_dataloader = sample_batch(train_dataloader)
                             if not hyperparas['re_sample_concat']:
                                 dataset_ids = np.array([])
